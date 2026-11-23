@@ -72,11 +72,42 @@ class Telegram:
                 'chat_id': self.chat_id, 'text': text,
                 'link_preview_options': {'is_disabled': True},
             }, timeout=(10, self.timeout))
-            if response.status_code != 200 or response.json().get('ok') is not True:
-                raise MonitorError(f'Telegram отклонил сообщение (HTTP {response.status_code})')
-        except (requests.RequestException, ValueError):
-            # requests exceptions can contain the token in the URL. Never log them.
-            raise MonitorError('Ошибка соединения с Telegram; сообщение не отмечено доставленным') from None
+        except requests.exceptions.ConnectTimeout:
+            raise MonitorError('Telegram: ConnectTimeout — соединение не установлено за 10 секунд') from None
+        except requests.exceptions.ReadTimeout:
+            raise MonitorError(
+                f'Telegram: ReadTimeout — ответ не получен за {self.timeout} секунд; '
+                'сообщение могло быть доставлено, проверьте чат') from None
+        except requests.exceptions.SSLError:
+            raise MonitorError('Telegram: SSLError — ошибка проверки TLS-сертификата') from None
+        except requests.exceptions.ConnectionError:
+            raise MonitorError('Telegram: ConnectionError — ошибка DNS, подключения или разрыв соединения') from None
+        except requests.RequestException:
+            # Never log exception text: it may contain the bot token in the URL.
+            raise MonitorError('Telegram: RequestException — ошибка HTTP-клиента') from None
+        try:
+            data = response.json()
+        except ValueError:
+            raise MonitorError(
+                f'Telegram: HTTP {response.status_code}, ответ не является JSON') from None
+        if not isinstance(data, dict):
+            raise MonitorError(f'Telegram: HTTP {response.status_code}, неизвестный формат ответа')
+        if response.status_code != 200 or data.get('ok') is not True:
+            code = data.get('error_code', response.status_code)
+            hints = {
+                400: 'проверьте chat_id и нажмите Start у своего бота',
+                401: 'токен не принят; проверьте TELEGRAM_BOT_TOKEN',
+                403: 'боту запрещено писать в чат; проверьте, не заблокирован ли он',
+                404: 'проверьте формат токена в TELEGRAM_BOT_TOKEN',
+            }
+            hint = hints.get(code, 'Telegram отклонил запрос') if isinstance(code, int) else 'неизвестный код ошибки'
+            if code == 429:
+                params = data.get('parameters')
+                delay = params.get('retry_after') if isinstance(params, dict) else None
+                hint = (f'лимит запросов; повторите не раньше чем через {delay} секунд'
+                        if isinstance(delay, int) and delay >= 0 else 'лимит запросов')
+            raise MonitorError(f'Telegram: HTTP {response.status_code}; {hint}')
+
 
 
 class Kino:
