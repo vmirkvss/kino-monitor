@@ -3,7 +3,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+import requests
+from main import Telegram
 import yaml
 from main import Kino, MonitorError, matches, new_state, parse_session, process, read_state, save_state, validate_schedule
 CFG = yaml.safe_load(Path('config.yaml').read_text())
@@ -92,5 +94,61 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(read_state(path), state)
             path.write_text('{}')
             with self.assertRaises(MonitorError): read_state(path)
+
+class TelegramTests(unittest.TestCase):
+    def telegram(self):
+        with patch.dict('os.environ', {'TELEGRAM_BOT_TOKEN': 'secret-token', 'TELEGRAM_CHAT_ID': '123'}):
+            return Telegram()
+
+    def test_transport_errors_redact_token(self):
+        for kind, label in [(requests.exceptions.ConnectTimeout, 'ConnectTimeout'),
+                            (requests.exceptions.ReadTimeout, 'ReadTimeout'),
+                            (requests.exceptions.SSLError, 'SSLError'),
+                            (requests.exceptions.ConnectionError, 'ConnectionError')]:
+            with patch('main.requests.post', side_effect=kind('secret-token')):
+                with self.assertRaises(MonitorError) as caught:
+                    self.telegram().send('test')
+                self.assertIn(label, str(caught.exception))
+                self.assertNotIn('secret-token', str(caught.exception))
+
+    def test_rate_limit(self):
+        response = Mock(status_code=429)
+        response.json.return_value = {'ok': False, 'error_code': 429, 'parameters': {'retry_after': 32}}
+        with patch('main.requests.post', return_value=response) as post, patch('main.time.sleep') as sleep:
+            with self.assertRaisesRegex(MonitorError, '32 секунд'):
+                self.telegram().send('test')
+            self.assertEqual(post.call_count, 2)
+            sleep.assert_any_call(33)
+
+    def test_rate_limit_recovers(self):
+        limited = Mock(status_code=429)
+        limited.json.return_value = {'ok': False, 'error_code': 429, 'parameters': {'retry_after': 32}}
+        success = Mock(status_code=200)
+        success.json.return_value = {'ok': True}
+        with patch('main.requests.post', side_effect=[limited, success]) as post, patch('main.time.sleep') as sleep:
+            self.telegram().send('test')
+            sleep.assert_any_call(33)
+            self.assertEqual(post.call_count, 2)
+
+    def test_long_limit_does_not_retry_early(self):
+        response = Mock(status_code=429)
+        response.json.return_value = {'ok': False, 'error_code': 429, 'parameters': {'retry_after': 600}}
+        with patch('main.requests.post', return_value=response) as post, patch('main.time.sleep'):
+            with self.assertRaisesRegex(MonitorError, '600 секунд'):
+                self.telegram().send('test')
+            self.assertEqual(post.call_count, 1)
+
+    def test_non_json(self):
+        response = Mock(status_code=502)
+        response.json.side_effect = ValueError('secret-token')
+        with patch('main.requests.post', return_value=response):
+            with self.assertRaisesRegex(MonitorError, 'HTTP 502, ответ не является JSON'):
+                self.telegram().send('test')
+
+    def test_success(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {'ok': True}
+        with patch('main.requests.post', return_value=response):
+            self.telegram().send('test')
 
 if __name__ == '__main__': unittest.main()
