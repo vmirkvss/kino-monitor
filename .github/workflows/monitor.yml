@@ -1,0 +1,102 @@
+name: Kino monitor
+on:
+  schedule:
+    - cron: '2-57/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'Только тестовое сообщение Telegram'
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: kino-monitor
+  cancel-in-progress: false
+jobs:
+  monitor:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore cached state
+        if: ${{ inputs.test != true }}
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: kino-state-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            kino-state-v1-
+      - name: Restore durable state
+        id: restore
+        if: ${{ inputs.test != true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A network error must fail, never silently initialize empty history.
+          remote_state=$(git ls-remote --heads origin refs/heads/monitor-state)
+          if [ -n "$remote_state" ]; then
+            git fetch origin monitor-state
+            git show FETCH_HEAD:state.json > state-from-branch.json
+            # Cache may be newer if the previous git push failed.
+            python - <<'PY'
+          import json
+          from pathlib import Path
+          branch = json.loads(Path('state-from-branch.json').read_text())
+          path = Path('state.json')
+          cache = json.loads(path.read_text()) if path.exists() else {}
+          if cache.get('next_poll', 0) <= branch.get('next_poll', 0):
+              path.write_text(json.dumps(branch, ensure_ascii=False, indent=2) + '\n')
+          PY
+          fi
+          echo 'ready=true' >> "$GITHUB_OUTPUT"
+      - name: Check cinema or send test
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEST_MODE: ${{ inputs.test }}
+        run: |
+          if [ "$TEST_MODE" = "true" ]; then
+            python main.py --test
+          else
+            python main.py
+          fi
+      - name: Save state cache even after a failed check
+        if: ${{ always() && steps.restore.outputs.ready == 'true' && hashFiles('state.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: kino-state-v1-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save durable state on separate branch
+        if: ${{ always() && steps.restore.outputs.ready == 'true' && hashFiles('state.json') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          remote_state=$(git ls-remote --heads origin refs/heads/monitor-state)
+          state_index="$RUNNER_TEMP/kino-state-index"
+          export GIT_INDEX_FILE="$state_index"
+          rm -f "$GIT_INDEX_FILE"
+          parent=""
+          if [ -n "$remote_state" ]; then
+            git fetch origin monitor-state
+            parent=$(git rev-parse FETCH_HEAD)
+          fi
+          git read-tree --empty
+          blob=$(git hash-object -w state.json)
+          git update-index --add --cacheinfo "100644,$blob,state.json"
+          tree=$(git write-tree)
+          if [ -n "$parent" ]; then
+            commit=$(git commit-tree "$tree" -p "$parent" -m 'Update kino monitor state')
+          else
+            commit=$(git commit-tree "$tree" -m 'Initialize kino monitor state')
+          fi
+          # Fast-forward only; no force push and no modifications to main.
+          git push origin "$commit:refs/heads/monitor-state"
