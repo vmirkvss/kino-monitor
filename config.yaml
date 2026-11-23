@@ -1,0 +1,34 @@
+site: https://kino.kz
+city_id: 2
+city_cookie: city
+timezone: Asia/Almaty
+# Дополнительная защита от площадок других городов: lat min/max, lon min/max.
+city_bounds: [43.0, 43.5, 76.7, 77.2]
+movie:
+  # В каждой группе достаточно одного слова; должны совпасть ВСЕ группы.
+  keyword_groups:
+    - [avengers, мстители]
+    - [doomsday, судный день, доктор дум]
+  premiere: '2027-01-07'
+  lookahead_days: 120
+cinemas:
+  - label: Chaplin MEGA Alma-Ata
+    keyword_groups:
+      - [chaplin, чаплин]
+      - [mega, мега]
+      - [alma-ata, alma ata, алма-ата, розыбакиев]
+    exclude: [park, парк, adk, адк]
+  - label: Cinemax Dostyk Multiplex
+    keyword_groups:
+      - [cinemax, синемакс]
+      - [dostyk, достык]
+    exclude: []
+interval_seconds: 300
+jitter_seconds: 30
+timeout_seconds: 25
+retries: 2
+request_pause_seconds: 1
+warning_threshold: 3
+heartbeat_seconds: 86400
+max_schedule_dates: 90
+user_agent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 KinoAvailabilityMonitor/1.0'
