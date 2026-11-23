@@ -22,6 +22,12 @@ class MonitorError(Exception):
     pass
 
 
+class TelegramRateLimit(MonitorError):
+    def __init__(self, retry_after):
+        self.retry_after = retry_after
+        super().__init__(f'Telegram: HTTP 429; повтор не раньше чем через {retry_after} секунд')
+
+
 def matches(text, groups):
     text = text.casefold()
     return all(any(word.casefold() in text for word in group) for group in groups)
@@ -63,9 +69,26 @@ class Telegram:
         if not token or not self.chat_id:
             raise MonitorError('Задайте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в Secrets')
         self.url = f'https://api.telegram.org/bot{token}/sendMessage'
-        self.timeout = timeout
+        # Telegram sometimes delays the error response itself beyond 25 seconds.
+        self.timeout = max(timeout, 60)
+        self.last_sent = 0.0
 
     def send(self, text):
+        # Avoid bursts if many new sessions appear in the same chat.
+        time.sleep(max(0, 1.1 - (time.monotonic() - self.last_sent)))
+        try:
+            self._send_once(text)
+        except TelegramRateLimit as exc:
+            # A definite 429 means this attempt was rejected, so retrying is safe.
+            # Never retry ambiguous network timeouts or perform an unbounded loop.
+            if exc.retry_after > 60:
+                raise
+            LOG.warning('Telegram запросил паузу %d секунд; один повтор после паузы', exc.retry_after)
+            time.sleep(exc.retry_after + 1)
+            self._send_once(text)
+        self.last_sent = time.monotonic()
+
+    def _send_once(self, text):
         # Do not blindly retry POST after timeout: Telegram may already have sent it.
         try:
             response = requests.post(self.url, json={
@@ -104,8 +127,9 @@ class Telegram:
             if code == 429:
                 params = data.get('parameters')
                 delay = params.get('retry_after') if isinstance(params, dict) else None
-                hint = (f'лимит запросов; повторите не раньше чем через {delay} секунд'
-                        if isinstance(delay, int) and delay >= 0 else 'лимит запросов')
+                if isinstance(delay, int) and delay >= 0:
+                    raise TelegramRateLimit(delay)
+                hint = 'лимит запросов; retry_after отсутствует'
             raise MonitorError(f'Telegram: HTTP {response.status_code}; {hint}')
 
 
@@ -314,7 +338,12 @@ def main():
         -cfg['jitter_seconds'], cfg['jitter_seconds'])
     persist = lambda: save_state(path, state)
     persist()
-    return process(state, cfg, kino.collect, tg.send, persist, now)
+    try:
+        return process(state, cfg, kino.collect, tg.send, persist, now)
+    except TelegramRateLimit as exc:
+        state['next_poll'] = max(state['next_poll'], time.time() + exc.retry_after + 1)
+        persist()
+        raise
 
 
 if __name__ == '__main__':
