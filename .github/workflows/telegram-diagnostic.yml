@@ -1,0 +1,59 @@
+name: Telegram connection diagnostic
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - name: Check Telegram connection without sending messages
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python -u - <<'PY'
+          import os, re, socket, time, requests
+          token = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+          chat = os.environ.get('TELEGRAM_CHAT_ID', '')
+          print('Token format valid:', bool(re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]+', token)))
+          print('Token has surrounding whitespace:', token != token.strip())
+          print('Chat ID numeric:', bool(re.fullmatch(r'-?[0-9]+', chat)))
+          print('Proxy environment present:', any(os.environ.get(k) for k in ['HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy']))
+          try:
+              addresses = socket.getaddrinfo('api.telegram.org', 443, type=socket.SOCK_STREAM)
+              print('DNS address families:', sorted({int(a[0]) for a in addresses}))
+          except Exception as exc:
+              print('DNS error:', type(exc).__name__)
+          for label, method, url, trust in [
+              ('public-root', 'GET', 'https://api.telegram.org/', True),
+              ('getMe-get', 'GET', 'https://api.telegram.org/bot' + token + '/getMe', True),
+              ('getMe-post', 'POST', 'https://api.telegram.org/bot' + token + '/getMe', True),
+              ('getMe-direct', 'GET', 'https://api.telegram.org/bot' + token + '/getMe', False),
+          ]:
+              session = requests.Session()
+              session.trust_env = trust
+              start = time.monotonic()
+              try:
+                  response = session.request(method, url, timeout=(8, 12), allow_redirects=False)
+                  print(label, 'HTTP', response.status_code, 'seconds', round(time.monotonic()-start, 1))
+                  try:
+                      data = response.json()
+                      if isinstance(data, dict):
+                          print('ok:', data.get('ok'), 'error_code:', data.get('error_code'))
+                          params = data.get('parameters')
+                          if isinstance(params, dict) and isinstance(params.get('retry_after'), int):
+                              print('retry_after:', params['retry_after'])
+                  except ValueError:
+                      print('Non-JSON response')
+              except requests.RequestException as exc:
+                  print(label, 'error:', type(exc).__name__, 'seconds', round(time.monotonic()-start, 1))
+              finally:
+                  session.close()
+              time.sleep(2)
+          PY
