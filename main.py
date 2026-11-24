@@ -314,13 +314,16 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     cfg = yaml.safe_load(Path(args.config).read_text())
     if args.test:
-        Telegram(cfg['timeout_seconds']).send('✅ Тест: монитор kino.kz подключён к Telegram.')
+        Telegram(cfg['timeout_seconds']).send('✅ Тестовый запуск workflow: бот на связи. Опрос kino.kz не выполнялся.')
         return 0
     kino = Kino(cfg)
     if args.dry_run:
         print(json.dumps(kino.collect(), ensure_ascii=False, indent=2))
         return 0
     tg = Telegram(cfg['timeout_seconds'])
+    # Notify only for a manual GitHub Actions run, never on every scheduled poll.
+    if os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch':
+        tg.send('▶️ Монитор kino.kz запущен вручную. Начинаю проверку сеансов в выбранных кинотеатрах Алматы.')
     path = Path(args.state)
     state = read_state(path)
     # Previous cycle chooses the next eligible instant: 300 ± 30 seconds.
